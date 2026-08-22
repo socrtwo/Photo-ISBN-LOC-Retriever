@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shelf Snap — Book Spine → ISBN / LCCN for LibraryThing</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <meta name="theme-color" content="#7a4d1f">
+</head>
+<body>
+  <header>
+    <h1>📚 Shelf Snap</h1>
+    <p class="tagline">
+      Photograph a bookshelf → get authors, titles, ISBNs and Library&nbsp;of&nbsp;Congress numbers,
+      ready to paste into <a href="https://www.librarything.com/import" target="_blank" rel="noopener">LibraryThing's import tool</a>.
+    </p>
+  </header>
+
+  <main>
+    <!-- ============ Step 1: Photo ============ -->
+    <section class="card" id="step-photo">
+      <h2><span class="step-num">1</span> Get photos</h2>
+      <p class="hint">Use high-resolution photos taken straight-on, with spines filling the frame and text readable.
+        You can add several photos (e.g. one per shelf) and process them all at once.</p>
+
+      <div id="drop-zone" tabindex="0">
+        <p><strong>Drop photos here</strong> or</p>
+        <div class="btn-row">
+          <label class="btn primary">
+            Choose photos
+            <input type="file" id="file-input" accept="image/*" multiple hidden>
+          </label>
+          <label class="btn">
+            📱 Snap with camera
+            <input type="file" id="capture-input" accept="image/*" capture="environment" hidden>
+          </label>
+          <button class="btn" id="webcam-btn" type="button">🎥 Use webcam</button>
+        </div>
+      </div>
+
+      <div id="gallery" class="gallery" hidden></div>
+      <div class="btn-row" id="gallery-actions" hidden>
+        <button class="btn small" id="clear-photos" type="button">✕ Remove all photos</button>
+      </div>
+    </section>
+
+    <!-- Webcam modal -->
+    <dialog id="camera-dialog">
+      <video id="camera-video" autoplay playsinline></video>
+      <div class="btn-row">
+        <button class="btn primary" id="camera-shoot" type="button">📸 Capture</button>
+        <button class="btn" id="camera-cancel" type="button">Cancel</button>
+      </div>
+    </dialog>
+
+    <!-- ============ Step 2: Read the spines ============ -->
+    <section class="card" id="step-engine">
+      <h2><span class="step-num">2</span> Read the spines</h2>
+
+      <div class="engine-choice">
+        <label class="engine-option">
+          <input type="radio" name="engine" value="claude" checked>
+          <div>
+            <strong>Claude AI vision</strong> <span class="badge rec">recommended</span>
+            <p class="hint">Best accuracy on angled/vertical spine text. The photo is sent to the Anthropic API
+              using <em>your own</em> API key (get one at <a href="https://console.anthropic.com/" target="_blank" rel="noopener">console.anthropic.com</a>).</p>
+          </div>
+        </label>
+        <label class="engine-option">
+          <input type="radio" name="engine" value="ocr">
+          <div>
+            <strong>Local OCR (Tesseract)</strong>
+            <p class="hint">Free and fully in-browser — the photo never leaves your computer — but much less
+              accurate on spines. Expect to correct the detected titles by hand.</p>
+          </div>
+        </label>
+      </div>
+
+      <div id="claude-settings">
+        <div class="field-row">
+          <label for="api-key">Anthropic API key</label>
+          <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off">
+          <label class="checkbox-inline">
+            <input type="checkbox" id="remember-key"> remember in this browser
+          </label>
+        </div>
+        <div class="field-row">
+          <label for="model-select">Model</label>
+          <select id="model-select">
+            <option value="claude-opus-5" selected>Claude Opus 5 (best)</option>
+            <option value="claude-sonnet-5">Claude Sonnet 5 (cheaper)</option>
+            <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheapest)</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="btn primary big" id="extract-btn" type="button" disabled>Read the spines →</button>
+      <div id="extract-status" class="status" hidden></div>
+    </section>
+
+    <!-- ============ Step 3: Review detected books ============ -->
+    <section class="card" id="step-review" hidden>
+      <h2><span class="step-num">3</span> Review detected books</h2>
+      <p class="hint">Fix any misread titles/authors before the lookup — better text means better ISBN matches.
+        You can also add books the reader missed.</p>
+      <table class="edit-table" id="detected-table">
+        <thead>
+          <tr><th>Title</th><th>Author</th><th>Publisher / clues seen on spine</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="btn-row">
+        <button class="btn small" id="add-row-btn" type="button">＋ Add a book</button>
+      </div>
+      <button class="btn primary big" id="lookup-btn" type="button">Look up ISBNs &amp; LCCNs →</button>
+      <div id="lookup-status" class="status" hidden></div>
+    </section>
+
+    <!-- ============ Step 4: Results ============ -->
+    <section class="card" id="step-results" hidden>
+      <h2><span class="step-num">4</span> Results</h2>
+      <p class="hint">
+        <span class="badge guessed">guessed</span> = the exact edition couldn't be told from the spine, so the most
+        likely edition's number was chosen. Click <em>alternates</em> to pick a different edition.
+      </p>
+      <div class="table-scroll">
+        <table class="results-table" id="results-table">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="check-all" checked title="select all"></th>
+              <th>Author</th><th>Title</th><th>ISBN-13</th><th>ISBN-10</th><th>LCCN</th><th>Match</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>Send to LibraryThing</h3>
+      <p class="hint">
+        LibraryThing's <a href="https://www.librarything.com/import" target="_blank" rel="noopener">Universal Import</a>
+        accepts a pasted list of ISBNs (or LCCNs). Copy a list below, open the import page, and paste.
+      </p>
+      <div class="btn-row">
+        <button class="btn primary" id="copy-isbns" type="button">📋 Copy ISBN list</button>
+        <button class="btn" id="copy-lccns" type="button">📋 Copy LCCN list</button>
+        <button class="btn" id="copy-tsv" type="button">📋 Copy table (tab-separated)</button>
+        <button class="btn" id="download-csv" type="button">⬇ Download CSV</button>
+        <a class="btn" href="https://www.librarything.com/import" target="_blank" rel="noopener">Open LibraryThing import ↗</a>
+      </div>
+      <div id="copy-status" class="status" hidden></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      Lookups use <a href="https://openlibrary.org" target="_blank" rel="noopener">Open Library</a> and
+      <a href="https://books.google.com" target="_blank" rel="noopener">Google Books</a>.
+      Only book title/author text is sent to those services. In OCR mode the photo never leaves your browser;
+      in Claude mode it is sent only to the Anthropic API under your key.
+    </p>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
