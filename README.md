@@ -1,4 +1,4 @@
-# Shelf Snap (Photo-ISBN-LOC-Retiever)
+# Shelf Snap (Photo-ISBN-LOC-Retriever)
 
 Photograph a bookshelf → get **authors, titles, ISBNs and Library of Congress numbers (LCCNs)**,
 ready to paste into [LibraryThing's Universal Import](https://www.librarything.com/import) to add
