@@ -1,0 +1,8 @@
+{
+  "appId": "com.socrtwo.shelfsnap",
+  "appName": "Shelf Snap",
+  "webDir": "app",
+  "android": {
+    "allowMixedContent": false
+  }
+}

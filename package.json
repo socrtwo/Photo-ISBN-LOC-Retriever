@@ -1,0 +1,53 @@
+{
+  "name": "shelf-snap",
+  "version": "0.1.0",
+  "description": "Photograph a bookshelf and get authors, titles, ISBNs and LCCNs ready for LibraryThing import.",
+  "author": "socrtwo <socrtwo@gmail.com>",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "icons": "node scripts/gen-icons.mjs",
+    "dist": "electron-builder --publish never",
+    "serve": "npx --yes http-server app -p 8080"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/cli": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.socrtwo.shelfsnap",
+    "productName": "Shelf Snap",
+    "files": [
+      "electron/**/*",
+      "app/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  }
+}

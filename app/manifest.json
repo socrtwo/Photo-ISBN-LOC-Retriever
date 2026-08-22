@@ -1,0 +1,14 @@
+{
+  "name": "Shelf Snap — Book Spine to ISBN/LCCN",
+  "short_name": "Shelf Snap",
+  "description": "Photograph a bookshelf and get authors, titles, ISBNs and LCCNs ready for LibraryThing import.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#faf6f0",
+  "theme_color": "#7a4d1f",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,168 @@
+name: Build all platforms & publish preliminary release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/book-spine-isbn-extractor-2p7ixj
+      - main
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: v0.1.0-preview
+
+jobs:
+  web:
+    name: Web (PWA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package web app
+        run: |
+          cd app
+          zip -r ../shelf-snap-web.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: shelf-snap-web.zip
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build with electron-builder
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p out
+          find dist -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} out/ \;
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.artifact }}
+          path: out/*
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Generate Android project
+        run: |
+          npx cap add android
+          npx cap sync android
+      - name: Build debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk shelf-snap-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: shelf-snap-android.apk
+
+  ios:
+    name: iOS (unsigned IPA)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Generate iOS project
+        run: |
+          npx cap add ios
+          npx cap sync ios
+      - name: Build (unsigned)
+        run: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace -scheme App \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Package unsigned IPA
+        run: |
+          mkdir Payload
+          cp -r ios/App/build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -r shelf-snap-ios-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: shelf-snap-ios-unsigned.ipa
+
+  release:
+    name: Publish preliminary release
+    needs: [web, desktop, android, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -la artifacts
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="Preliminary (preview) release of Shelf Snap — photograph a bookshelf, get authors/titles/ISBNs/LCCNs ready for LibraryThing import.
+
+          | Platform | File | Notes |
+          |---|---|---|
+          | Windows | \`Shelf Snap Setup *.exe\` / portable \`.exe\` | Unsigned — SmartScreen may warn; choose *More info → Run anyway* |
+          | macOS | \`.dmg\` / \`.zip\` | Unsigned — right-click → Open the first time |
+          | Linux | \`.AppImage\` / \`.deb\` | Mark the AppImage executable and run |
+          | Android | \`shelf-snap-android.apk\` | Debug-signed; enable *Install unknown apps* to sideload |
+          | ChromeOS | use the Android APK, or install the web app as a PWA | |
+          | iOS | \`shelf-snap-ios-unsigned.ipa\` | Unsigned — requires sideloading (AltStore/Sideloadly) or your own signing; or install the web version as a PWA from Safari (*Share → Add to Home Screen*) |
+          | Web | \`shelf-snap-web.zip\` | Unzip and serve statically, or host on GitHub Pages |
+          "
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          gh release create "$RELEASE_TAG" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Shelf Snap $RELEASE_TAG (preliminary)" \
+            --notes "$NOTES" \
+            artifacts/*
