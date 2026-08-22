@@ -4,87 +4,165 @@
 
 import { normalizeIsbn, normalizeLccn } from "./isbn.js";
 
-const OL_FIELDS = "key,title,author_name,isbn,lccn,publisher,first_publish_year,edition_count";
+const OL_FIELDS =
+  "key,title,author_name,isbn,lccn,publisher,first_publish_year,edition_count";
 
+function normTitle(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mainTitle(s) {
+  // "Social Conflict: Escalation, Stalemate and Settlement" -> "Social Conflict"
+  const cut = String(s || "").split(/[:;]|\s[-–—]\s/)[0].trim();
+  return cut || s;
+}
+
+const STOPWORDS = new Set(["the", "a", "an", "of", "and", "in", "on", "for", "to", "is"]);
+function tokens(s) {
+  return new Set(normTitle(s).split(" ").filter((w) => w && !STOPWORDS.has(w)));
+}
+
+// Containment similarity: how much of the SHORTER title is inside the longer.
+// Subtitles present on one side but not the other don't tank the score.
 function titleSimilarity(a, b) {
-  const norm = (s) =>
-    s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-  const ta = new Set(norm(a).split(" "));
-  const tb = new Set(norm(b).split(" "));
+  const ta = tokens(a);
+  const tb = tokens(b);
   if (!ta.size || !tb.size) return 0;
   let hit = 0;
   for (const w of ta) if (tb.has(w)) hit++;
-  return hit / Math.max(ta.size, tb.size);
+  return hit / Math.min(ta.size, tb.size);
 }
 
-async function fetchJson(url) {
-  const r = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!r.ok) throw new Error(`${new URL(url).hostname} returned ${r.status}`);
-  return r.json();
+function authorMatches(author, names) {
+  if (!author || !names?.length) return false;
+  const want = tokens(author);
+  if (!want.size) return false;
+  return names.some((name) => {
+    const have = tokens(name);
+    // A spine often shows just a surname — one shared name token is a match.
+    for (const w of want) if (have.has(w)) return true;
+    return false;
+  });
+}
+
+async function fetchJson(url, retries = 1) {
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    if (r.ok) return r.json();
+    if ((r.status === 429 || r.status >= 500) && attempt < retries) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
+      continue;
+    }
+    throw new Error(`${new URL(url).hostname} returned ${r.status}`);
+  }
+}
+
+function scoreDoc(doc, book) {
+  const full = titleSimilarity(book.title, doc.title || "");
+  const main = titleSimilarity(mainTitle(book.title), doc.title || "");
+  let score = Math.max(full, main * 0.95);
+  const authorHit = authorMatches(book.author, doc.author_name);
+  if (book.author) score += authorHit ? 0.35 : -0.1;
+  score += Math.min(0.15, (doc.edition_count || 0) / 500); // mild popularity prior
+  return { score, authorHit };
 }
 
 async function searchOpenLibrary(book) {
-  const params = new URLSearchParams({ limit: "5", fields: OL_FIELDS });
-  params.set("title", book.title);
-  if (book.author) params.set("author", book.author);
-  let data = await fetchJson(`https://openlibrary.org/search.json?${params}`);
-
-  if (!data.docs?.length && book.author) {
-    // Author may have been misread — retry on title alone.
-    const p2 = new URLSearchParams({ limit: "5", fields: OL_FIELDS, title: book.title });
-    data = await fetchJson(`https://openlibrary.org/search.json?${p2}`);
+  const attempts = [];
+  const t = book.title;
+  const mt = mainTitle(book.title);
+  if (book.author) attempts.push({ title: t, author: book.author });
+  attempts.push({ title: t });
+  if (mt !== t) {
+    if (book.author) attempts.push({ title: mt, author: book.author });
+    attempts.push({ title: mt });
   }
-  if (!data.docs?.length) return null;
+  attempts.push({ q: `${mt} ${book.author || ""}`.trim() });
 
   let best = null;
   let bestScore = 0;
-  for (const doc of data.docs) {
-    let score = titleSimilarity(book.title, doc.title || "");
-    if (book.author && doc.author_name?.length) {
-      const authorHit = doc.author_name.some(
-        (a) => titleSimilarity(book.author, a) > 0.5
-      );
-      score += authorHit ? 0.4 : -0.15;
+  let bestAuthorHit = false;
+  for (const attempt of attempts) {
+    const params = new URLSearchParams({ limit: "5", fields: OL_FIELDS });
+    for (const [k, v] of Object.entries(attempt)) params.set(k, v);
+    let data;
+    try {
+      data = await fetchJson(`https://openlibrary.org/search.json?${params}`);
+    } catch {
+      continue; // try the next query shape
     }
-    score += Math.min(0.2, (doc.edition_count || 0) / 500); // mild popularity prior
-    if (score > bestScore) { bestScore = score; best = doc; }
+    for (const doc of data.docs ?? []) {
+      const { score, authorHit } = scoreDoc(doc, book);
+      if (score > bestScore) {
+        best = doc;
+        bestScore = score;
+        bestAuthorHit = authorHit;
+      }
+    }
+    // A confident match ends the search early; a weak one keeps trying shapes.
+    if (bestScore >= 0.9) break;
   }
-  return bestScore >= 0.45 ? best : null;
+  // Accept a weaker title match when the author corroborates it.
+  const threshold = bestAuthorHit ? 0.55 : 0.75;
+  return bestScore >= threshold ? best : null;
 }
 
-// When a publisher was visible on the spine, try to pin the edition by scanning
-// the work's edition list for a publisher match.
-async function pinEditionByPublisher(workKey, publisher) {
+// Scan the work's edition list. With a publisher clue we try to pin the exact
+// edition; without one we still use it to find ISBNs the search doc lacked.
+async function scanEditions(workKey, publisher) {
+  const out = { pinned: null, isbns: [], lccns: [] };
+  let data;
   try {
-    const data = await fetchJson(
-      `https://openlibrary.org${workKey}/editions.json?limit=100`
-    );
-    const want = publisher.toLowerCase();
-    for (const ed of data.entries ?? []) {
-      const pubs = (ed.publishers ?? []).map((p) => p.toLowerCase());
-      if (!pubs.some((p) => p.includes(want) || want.includes(p))) continue;
-      const isbnRaw = ed.isbn_13?.[0] ?? ed.isbn_10?.[0];
-      const isbn = isbnRaw ? normalizeIsbn(isbnRaw) : null;
-      const lccn = ed.lccn?.[0] ? normalizeLccn(ed.lccn[0]) : null;
-      if (isbn || lccn) return { isbn, lccn, publisher: ed.publishers?.[0] };
-    }
+    data = await fetchJson(`https://openlibrary.org${workKey}/editions.json?limit=100`);
   } catch {
-    // editions endpoint is best-effort; fall through to the aggregate guess
+    return out;
   }
-  return null;
+  const want = publisher ? normTitle(publisher) : null;
+  for (const ed of data.entries ?? []) {
+    const isbnRaw = ed.isbn_13?.[0] ?? ed.isbn_10?.[0];
+    const isbn = isbnRaw ? normalizeIsbn(isbnRaw) : null;
+    const lccn = ed.lccn?.[0] ? normalizeLccn(ed.lccn[0]) : null;
+    if (isbn) out.isbns.push(isbn);
+    if (lccn) out.lccns.push(lccn);
+    if (want && !out.pinned && (isbn || lccn)) {
+      const pubs = (ed.publishers ?? []).map((p) => normTitle(p));
+      if (pubs.some((p) => p.includes(want) || want.includes(p))) {
+        out.pinned = { isbn, lccn, publisher: ed.publishers?.[0] };
+      }
+    }
+  }
+  return out;
 }
 
 async function searchGoogleBooks(book) {
-  const q = [`intitle:"${book.title}"`];
-  if (book.author) q.push(`inauthor:"${book.author}"`);
-  const url =
-    "https://www.googleapis.com/books/v1/volumes?maxResults=5&printType=books&q=" +
-    encodeURIComponent(q.join(" "));
-  try {
-    const data = await fetchJson(url);
+  const mt = mainTitle(book.title);
+  const queries = [];
+  {
+    const q = [`intitle:"${mt}"`];
+    if (book.author) q.push(`inauthor:"${book.author}"`);
+    queries.push(q.join(" "));
+  }
+  queries.push(`${mt} ${book.author || ""}`.trim()); // unquoted fallback
+
+  for (const q of queries) {
+    let data;
+    try {
+      data = await fetchJson(
+        "https://www.googleapis.com/books/v1/volumes?maxResults=5&printType=books&q=" +
+          encodeURIComponent(q),
+        2 // Google 429s freely without an API key — retry with backoff
+      );
+    } catch {
+      continue;
+    }
     for (const item of data.items ?? []) {
       const info = item.volumeInfo ?? {};
-      if (titleSimilarity(book.title, info.title || "") < 0.45) continue;
+      if (titleSimilarity(book.title, info.title || "") < 0.6) continue;
+      if (book.author && !authorMatches(book.author, info.authors)) continue;
       for (const id of info.industryIdentifiers ?? []) {
         if (id.type === "ISBN_13" || id.type === "ISBN_10") {
           const isbn = normalizeIsbn(id.identifier);
@@ -92,22 +170,21 @@ async function searchGoogleBooks(book) {
         }
       }
     }
-  } catch {
-    // Google Books is a bonus source; ignore failures (e.g. rate limiting)
   }
   return null;
 }
 
-function collectAlternates(doc, limit = 8) {
+function collectAlternates(doc, extra = [], limit = 8) {
   const seen = new Set();
   const alts = [];
-  for (const raw of doc?.isbn ?? []) {
-    const isbn = normalizeIsbn(raw);
-    if (!isbn || seen.has(isbn.isbn13)) continue;
-    seen.add(isbn.isbn13);
-    alts.push(isbn);
-    if (alts.length >= limit) break;
-  }
+  const push = (isbn) => {
+    if (isbn && !seen.has(isbn.isbn13) && alts.length < limit) {
+      seen.add(isbn.isbn13);
+      alts.push(isbn);
+    }
+  };
+  for (const raw of doc?.isbn ?? []) push(normalizeIsbn(raw));
+  for (const isbn of extra) push(isbn);
   return alts;
 }
 
@@ -141,7 +218,7 @@ export async function lookupBook(book) {
   }
   if (result.matchKind === "spine" && result.isbn13) return result;
 
-  // 1. Open Library work-level search.
+  // 1. Open Library work-level search (several query shapes).
   let doc = null;
   try {
     doc = await searchOpenLibrary(book);
@@ -155,14 +232,22 @@ export async function lookupBook(book) {
     result.alternates = collectAlternates(doc);
     if (!result.lccn && doc.lccn?.length) result.lccn = normalizeLccn(doc.lccn[0]);
 
-    // 2. Publisher visible on the spine → try to pin the exact edition.
-    if (!result.isbn13 && book.publisher && doc.key && (doc.edition_count ?? 0) > 1) {
-      const pinned = await pinEditionByPublisher(doc.key, book.publisher);
-      if (pinned?.isbn) {
-        Object.assign(result, pinned.isbn);
-        if (pinned.lccn) result.lccn = pinned.lccn;
+    // 2. Scan the edition list when we need more than the search doc offers:
+    //    to pin by publisher, or to find any ISBN/LCCN at all.
+    const needScan =
+      doc.key &&
+      ((book.publisher && (doc.edition_count ?? 0) > 1) ||
+        (!result.isbn13 && !result.alternates.length) ||
+        !result.lccn);
+    if (needScan) {
+      const scan = await scanEditions(doc.key, book.publisher);
+      result.alternates = collectAlternates(doc, scan.isbns);
+      if (!result.lccn && scan.lccns.length) result.lccn = scan.lccns[0];
+      if (scan.pinned?.isbn && !result.isbn13) {
+        Object.assign(result, scan.pinned.isbn);
+        if (scan.pinned.lccn) result.lccn ||= scan.pinned.lccn;
         result.matchKind = "pinned";
-        result.source = `edition matched by publisher (${pinned.publisher})`;
+        result.source = `edition matched by publisher (${scan.pinned.publisher})`;
         return result;
       }
     }
@@ -193,10 +278,17 @@ export async function lookupBook(book) {
       result.matchKind = "guessed";
       result.source ||= "best guess";
     }
+    if (!result.isbn13 && doc?.first_publish_year && doc.first_publish_year < 1970) {
+      result.source = `no ISBN — likely pre-ISBN era (first published ${doc.first_publish_year}); use the LCCN`;
+    }
     return result;
   }
 
-  result.source ||= "no match found — check the title/author spelling";
+  if (doc && doc.first_publish_year && doc.first_publish_year < 1970) {
+    result.source = `matched "${doc.title}" but found no ISBN/LCCN — likely a pre-ISBN era book`;
+  } else {
+    result.source ||= "no match found — check the title/author spelling";
+  }
   return result;
 }
 
@@ -218,7 +310,7 @@ export async function lookupAll(books, onProgress) {
         alternates: [],
       });
     }
-    await new Promise((r) => setTimeout(r, 350));
+    await new Promise((r) => setTimeout(r, 400));
   }
   return out;
 }

@@ -71,13 +71,17 @@ async function addFiles(fileList) {
   renderGallery();
 }
 
+// Snapshot the FileList BEFORE clearing the input: FileList is live, and
+// resetting .value empties it while the async add-loop is still reading it.
 $("#file-input").addEventListener("change", (e) => {
-  addFiles(e.target.files);
+  const files = [...e.target.files];
   e.target.value = "";
+  addFiles(files);
 });
 $("#capture-input").addEventListener("change", (e) => {
-  addFiles(e.target.files);
+  const files = [...e.target.files];
   e.target.value = "";
+  addFiles(files);
 });
 $("#clear-photos").addEventListener("click", () => {
   state.photos = [];
